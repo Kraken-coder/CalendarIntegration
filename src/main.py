@@ -207,6 +207,15 @@ async def outlook_calendar_callback(request: Request, code: str, state: str):
 
 # ===== HELPERS FOR CALENDAR EVENT SYNC & RULES =====
 
+def get_event_title(event: dict) -> str:
+    raw = event.get("raw") or {}
+    platform = event.get("platform") or "google_calendar"
+    if platform == "google_calendar":
+        return raw.get("summary") or "Untitled Meeting"
+    elif platform == "microsoft_outlook":
+        return raw.get("subject") or "Untitled Meeting"
+    return "Untitled Meeting"
+
 async def fetch_recall_calendar_events(recall_id: str, last_updated_ts: Optional[str] = None) -> List[dict]:
     events = []
     params = {"calendar_id": recall_id}
@@ -466,6 +475,7 @@ async def process_calendar_sync_background(recall_id: str, last_updated_ts: Opti
                 settings["should_record_automatic"] = existing_settings.get("should_record_automatic", False)
                 settings["should_record_manual"] = existing_settings.get("should_record_manual", None)
                 
+            event["title"] = get_event_title(event)
             event["settings"] = settings
             
             event_data = {
@@ -612,12 +622,62 @@ async def get_calendar_events(calendar_id: str, request: Request):
         raise HTTPException(status_code=403, detail="Forbidden: calendar does not belong to user")
         
     res = supabase.table("calendar_events").select("*").eq("calendar_id", calendar_id).execute()
-    events = res.data
+    raw_events = res.data
+    events = []
+    for e in raw_events:
+        recall_data = e.get("recall_data") or {}
+        if recall_data.get("meeting_url"):
+            events.append(e)
+            
     def get_start_time(e):
         recall_data = e.get("recall_data") or {}
         return recall_data.get("start_time", "")
     events.sort(key=get_start_time)
     return events
+
+@app.delete("/integrations/calendar/{calendar_id}")
+async def delete_calendar(calendar_id: str, request: Request):
+    user_id = get_user_id_from_token(request.headers.get("Authorization"))
+    if not user_id:
+        user_id = DEFAULT_TEST_USER_ID
+        
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not initialized")
+        
+    cal_res = supabase.table("calendars").select("*").eq("id", calendar_id).execute()
+    if not cal_res.data or cal_res.data[0]["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+        
+    calendar = cal_res.data[0]
+    recall_id = calendar["recall_id"]
+    
+    # 1. Delete bot schedules for all events of this calendar
+    events_res = supabase.table("calendar_events").select("recall_id").eq("calendar_id", calendar_id).execute()
+    for event in events_res.data:
+        try:
+            await delete_bot_for_event(event["recall_id"])
+        except Exception as e:
+            print(f"Error deleting bot for event {event['recall_id']} during calendar deletion: {e}")
+        
+    # 2. Delete calendar in Recall.ai
+    async with get_recall_client() as client:
+        try:
+            resp = await client.delete(f"/api/v2/calendars/{recall_id}/")
+            if resp.status_code not in [200, 204, 404]:
+                print(f"Recall calendar delete status: {resp.status_code} - {resp.text}")
+        except Exception as e:
+            print(f"Failed to delete calendar from Recall: {e}")
+            
+    # 3. Delete from Supabase
+    try:
+        supabase.table("calendar_events").delete().eq("calendar_id", calendar_id).execute()
+        supabase.table("calendars").delete().eq("id", calendar_id).execute()
+    except Exception as e:
+        print(f"Error deleting calendar records from Supabase: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+    
+    return {"status": "ok"}
+
 
 @app.patch("/integrations/calendar/{calendar_id}")
 async def update_calendar_settings(
