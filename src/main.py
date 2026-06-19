@@ -37,7 +37,7 @@ DEFAULT_TEST_USER_ID = "fd3ff615-b248-4e8f-84f1-ff458bf30d48"
 
 RECALL_API_KEY = os.getenv("RECALL_API_KEY")
 PUBLIC_URL = os.getenv("PUBLIC_URL", "http://localhost:8000")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://calspiked.vercel.app")
 RECALL_TRANSCRIPT_WEBHOOK_URL = os.getenv("RECALL_TRANSCRIPT_WEBHOOK_URL", f"{PUBLIC_URL}/webhook/recall/transcript")
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CALENDAR_OAUTH_CLIENT_ID")
@@ -208,13 +208,32 @@ async def outlook_calendar_callback(request: Request, code: str, state: str):
 # ===== HELPERS FOR CALENDAR EVENT SYNC & RULES =====
 
 def get_event_title(event: dict) -> str:
+    # Try top-level title first
+    if event.get("title") and event.get("title") != "Untitled Meeting":
+        return event.get("title")
+    
+    # Try raw summary / subject
     raw = event.get("raw") or {}
+    # Handle case where raw is string-serialized JSON
+    if isinstance(raw, str):
+        try:
+            import json
+            raw = json.loads(raw)
+        except Exception:
+            raw = {}
+            
+    # Try getting summary/subject/title directly first without strict platform check, for robustness
+    title = raw.get("summary") or raw.get("subject") or raw.get("title")
+    if title:
+        return title
+
     platform = event.get("platform") or "google_calendar"
-    if platform == "google_calendar":
-        return raw.get("summary") or "Untitled Meeting"
-    elif platform == "microsoft_outlook":
-        return raw.get("subject") or "Untitled Meeting"
-    return "Untitled Meeting"
+    if platform == "google_calendar" or "google" in platform:
+        return raw.get("summary") or raw.get("title") or "Untitled Meeting"
+    elif platform == "microsoft_outlook" or "outlook" in platform or "microsoft" in platform:
+        return raw.get("subject") or raw.get("title") or "Untitled Meeting"
+    return raw.get("title") or raw.get("summary") or raw.get("subject") or "Untitled Meeting"
+
 
 async def fetch_recall_calendar_events(recall_id: str, last_updated_ts: Optional[str] = None) -> List[dict]:
     events = []
@@ -333,6 +352,7 @@ async def update_auto_record_status_for_events(calendar: dict, events: List[dict
     calendar_email = get_calendar_email(calendar)
     
     calendar_settings = (calendar.get("recall_data") or {}).get("settings") or {}
+    auto_record_all = calendar_settings.get("auto_record_all_events", False)
     auto_record_external = calendar_settings.get("auto_record_external_events", False)
     auto_record_only_confirmed = calendar_settings.get("auto_record_only_confirmed_events", False)
     
@@ -353,7 +373,9 @@ async def update_auto_record_status_for_events(calendar: dict, events: List[dict
                 
         # 2. Evaluate auto-recording
         should_record_automatic = False
-        if auto_record_external:
+        if auto_record_all:
+            should_record_automatic = True
+        elif auto_record_external:
             should_record_automatic = is_external_event(recall_data, calendar_email)
             
         if auto_record_only_confirmed:
@@ -555,6 +577,7 @@ async def re_evaluate_calendar_events_background(calendar_id: str):
 # ===== REQUEST SCHEMAS =====
 
 class UpdateCalendarSettingsRequest(BaseModel):
+    auto_record_all_events: Optional[bool] = None
     auto_record_external_events: Optional[bool] = None
     auto_record_only_confirmed_events: Optional[bool] = None
 
@@ -627,6 +650,12 @@ async def get_calendar_events(calendar_id: str, request: Request):
     for e in raw_events:
         recall_data = e.get("recall_data") or {}
         if recall_data.get("meeting_url"):
+            # Dynamically resolve title if missing or fallback in DB
+            if not recall_data.get("title") or recall_data.get("title") == "Untitled Meeting":
+                if "platform" not in recall_data and e.get("platform"):
+                    recall_data["platform"] = e.get("platform")
+                recall_data["title"] = get_event_title(recall_data)
+                e["recall_data"] = recall_data
             events.append(e)
             
     def get_start_time(e):
@@ -701,6 +730,8 @@ async def update_calendar_settings(
     recall_data = calendar.get("recall_data") or {}
     settings = recall_data.get("settings") or {}
     
+    if req_body.auto_record_all_events is not None:
+        settings["auto_record_all_events"] = req_body.auto_record_all_events
     if req_body.auto_record_external_events is not None:
         settings["auto_record_external_events"] = req_body.auto_record_external_events
     if req_body.auto_record_only_confirmed_events is not None:
