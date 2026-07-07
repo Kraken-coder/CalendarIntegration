@@ -37,7 +37,7 @@ DEFAULT_TEST_USER_ID = "fd3ff615-b248-4e8f-84f1-ff458bf30d48"
 
 RECALL_API_KEY = os.getenv("RECALL_API_KEY")
 PUBLIC_URL = os.getenv("PUBLIC_URL", "http://localhost:8000")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "https://calspiked.vercel.app")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://app.spiked.ai")
 RECALL_TRANSCRIPT_WEBHOOK_URL = os.getenv("RECALL_TRANSCRIPT_WEBHOOK_URL", f"{PUBLIC_URL}/webhook/recall/transcript")
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CALENDAR_OAUTH_CLIENT_ID")
@@ -69,7 +69,8 @@ async def initiate_google_calendar(request: Request):
     if not user_id:
         user_id = DEFAULT_TEST_USER_ID # Fallback for demo
             
-    state = json.dumps({"userId": user_id})
+    redirect_to = request.query_params.get("redirect_to") or request.query_params.get("frontend_url") or request.query_params.get("origin") or f"{FRONTEND_URL}/documents/integrations"
+    state = json.dumps({"userId": user_id, "redirectTo": redirect_to})
     scopes = ["https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/calendar.events.readonly"]
     params = {
         "client_id": GOOGLE_CLIENT_ID,
@@ -87,6 +88,7 @@ async def initiate_google_calendar(request: Request):
 async def google_calendar_callback(request: Request, code: str, state: str):
     state_data = json.loads(state)
     user_id = state_data.get("userId")
+    redirect_to = state_data.get("redirectTo") or f"{FRONTEND_URL}/documents/integrations"
     
     async with httpx.AsyncClient() as client:
         token_res = await client.post("https://oauth2.googleapis.com/token", data={
@@ -99,7 +101,9 @@ async def google_calendar_callback(request: Request, code: str, state: str):
         token_data = token_res.json()
         
         if "error" in token_data:
-            return RedirectResponse(f"{FRONTEND_URL}/integrations?calendar_error={token_data['error']}")
+            base_redirect = redirect_to.rstrip("/")
+            sep = "&" if "?" in base_redirect else "?"
+            return RedirectResponse(f"{base_redirect}{sep}calendar_error={token_data['error']}")
             
         refresh_token = token_data.get("refresh_token")
         
@@ -109,7 +113,7 @@ async def google_calendar_callback(request: Request, code: str, state: str):
             "webhook_url": f"{PUBLIC_URL}/webhooks/recall-calendar-updates",
             "oauth_refresh_token": refresh_token,
             "oauth_client_id": GOOGLE_CLIENT_ID,
-            "oauth_client_secret": GOOGLE_CLIENT_SECRET
+            "oauth_client_secret": GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET if 'GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET' in globals() else GOOGLE_CLIENT_SECRET
         })
         recall_calendar = recall_res.json()
         
@@ -133,7 +137,9 @@ async def google_calendar_callback(request: Request, code: str, state: str):
             print(f"CRITICAL Error saving to Supabase DB: {e}")
             print(f"Exception type: {type(e)}")
         
-    return RedirectResponse(f"{FRONTEND_URL}/integrations?calendar_success=true")
+    base_redirect = redirect_to.rstrip("/")
+    sep = "&" if "?" in base_redirect else "?"
+    return RedirectResponse(f"{base_redirect}{sep}calendar_success=true")
 
 @app.get("/integrations/calendar/outlook/initiate")
 async def initiate_outlook_calendar(request: Request):
@@ -141,7 +147,8 @@ async def initiate_outlook_calendar(request: Request):
     if not user_id:
         user_id = DEFAULT_TEST_USER_ID
             
-    state = json.dumps({"userId": user_id})
+    redirect_to = request.query_params.get("redirect_to") or request.query_params.get("frontend_url") or request.query_params.get("origin") or f"{FRONTEND_URL}/documents/integrations"
+    state = json.dumps({"userId": user_id, "redirectTo": redirect_to})
     scopes = ["offline_access", "https://graph.microsoft.com/Calendars.Read", "openid", "email"]
     params = {
         "client_id": MS_CLIENT_ID,
@@ -157,6 +164,7 @@ async def initiate_outlook_calendar(request: Request):
 async def outlook_calendar_callback(request: Request, code: str, state: str):
     state_data = json.loads(state)
     user_id = state_data.get("userId")
+    redirect_to = state_data.get("redirectTo") or f"{FRONTEND_URL}/documents/integrations"
     
     async with httpx.AsyncClient() as client:
         token_res = await client.post("https://login.microsoftonline.com/common/oauth2/v2.0/token", data={
@@ -169,7 +177,9 @@ async def outlook_calendar_callback(request: Request, code: str, state: str):
         token_data = token_res.json()
         
         if "error" in token_data:
-            return RedirectResponse(f"{FRONTEND_URL}/integrations?calendar_error={token_data['error']}")
+            base_redirect = redirect_to.rstrip("/")
+            sep = "&" if "?" in base_redirect else "?"
+            return RedirectResponse(f"{base_redirect}{sep}calendar_error={token_data['error']}")
             
         refresh_token = token_data.get("refresh_token")
         
@@ -203,7 +213,9 @@ async def outlook_calendar_callback(request: Request, code: str, state: str):
             print(f"CRITICAL Error saving to Supabase DB (Outlook): {e}")
             print(f"Exception type: {type(e)}")
         
-    return RedirectResponse(f"{FRONTEND_URL}/integrations?calendar_success=true")
+    base_redirect = redirect_to.rstrip("/")
+    sep = "&" if "?" in base_redirect else "?"
+    return RedirectResponse(f"{base_redirect}{sep}calendar_success=true")
 
 # ===== HELPERS FOR CALENDAR EVENT SYNC & RULES =====
 
@@ -706,6 +718,59 @@ async def delete_calendar(calendar_id: str, request: Request):
         raise HTTPException(status_code=500, detail=f"Database error: {e}")
     
     return {"status": "ok"}
+
+
+@app.get("/integrations/calendar/{calendar_id}/connection-status")
+async def check_calendar_connection_status(calendar_id: str, request: Request):
+    user_id = get_user_id_from_token(request.headers.get("Authorization"))
+    if not user_id:
+        user_id = DEFAULT_TEST_USER_ID
+        
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not initialized")
+        
+    cal_res = supabase.table("calendars").select("*").eq("id", calendar_id).execute()
+    if not cal_res.data or cal_res.data[0]["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+        
+    calendar = cal_res.data[0]
+    recall_id = calendar["recall_id"]
+    
+    async with get_recall_client() as client:
+        try:
+            resp = await client.get(f"/api/v2/calendars/{recall_id}/")
+            if resp.status_code == 200:
+                recall_calendar = resp.json()
+                settings = (calendar.get("recall_data") or {}).get("settings") or {}
+                recall_calendar["settings"] = settings
+                
+                supabase.table("calendars").update({
+                    "recall_data": recall_calendar
+                }).eq("id", calendar_id).execute()
+                
+                status = recall_calendar.get("status")
+                return {
+                    "calendar_id": calendar_id,
+                    "recall_id": recall_id,
+                    "status": status,
+                    "connected": status == "connected"
+                }
+            else:
+                return {
+                    "calendar_id": calendar_id,
+                    "recall_id": recall_id,
+                    "status": "error",
+                    "connected": False,
+                    "detail": f"Recall API returned {resp.status_code}: {resp.text}"
+                }
+        except Exception as e:
+            return {
+                "calendar_id": calendar_id,
+                "recall_id": recall_id,
+                "status": "error",
+                "connected": False,
+                "detail": str(e)
+            }
 
 
 @app.patch("/integrations/calendar/{calendar_id}")
