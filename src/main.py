@@ -429,13 +429,7 @@ async def sync_event_bot_schedule(user_id: str, event: dict):
                     "realtime_endpoints": [{
                         "type": "webhook",
                         "url": RECALL_TRANSCRIPT_WEBHOOK_URL,
-                        "events": [
-                            "transcript.data",
-                            "transcript.partial_data",
-                            "bot.status_change",
-                            "bot.joining_call",
-                            "bot.done"
-                        ]
+                        "events": ["transcript.data", "transcript.partial_data"]
                     }]
                 },
                 "metadata": {
