@@ -38,7 +38,10 @@ DEFAULT_TEST_USER_ID = "fd3ff615-b248-4e8f-84f1-ff458bf30d48"
 RECALL_API_KEY = os.getenv("RECALL_API_KEY")
 PUBLIC_URL = os.getenv("PUBLIC_URL", "http://localhost:8000")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://app.spiked.ai")
-RECALL_TRANSCRIPT_WEBHOOK_URL = os.getenv("RECALL_TRANSCRIPT_WEBHOOK_URL", f"{PUBLIC_URL}/webhook/recall/transcript")
+RECALL_TRANSCRIPT_WEBHOOK_URL = os.getenv(
+    "RECALL_TRANSCRIPT_WEBHOOK_URL",
+    os.getenv("STREAM_PROCESSOR_WEBHOOK_URL", "https://stream-processor-409019309412.us-east1.run.app/webhook/recall/transcript")
+)
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CALENDAR_OAUTH_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CALENDAR_OAUTH_CLIENT_SECRET")
@@ -418,11 +421,21 @@ async def sync_event_bot_schedule(user_id: str, event: dict):
             bot_config = {
                 "bot_name": "SpikedAI",
                 "recording_config": {
+                    "retention": {
+                        "type": "timed",
+                        "hours": 168
+                    },
                     "transcript": {"provider": {"meeting_captions": {}}},
                     "realtime_endpoints": [{
                         "type": "webhook",
                         "url": RECALL_TRANSCRIPT_WEBHOOK_URL,
-                        "events": ["transcript.data", "transcript.partial_data"]
+                        "events": [
+                            "transcript.data",
+                            "transcript.partial_data",
+                            "bot.status_change",
+                            "bot.joining_call",
+                            "bot.done"
+                        ]
                     }]
                 },
                 "metadata": {
